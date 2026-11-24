@@ -16,7 +16,19 @@ h1{font-size:20px;margin:4px 0 12px;color:var(--accent)}
 .stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;color:var(--muted)}
 .stats b{color:var(--ink)}
 input[type=search]{width:100%;font-size:16px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
-label.chk{display:flex;align-items:center;gap:6px;font-size:14px;margin:10px 0;color:var(--muted);cursor:pointer}
+.search-wrap{position:relative;z-index:2}
+.suggestions{position:absolute;top:calc(100% + 4px);right:0;left:0;max-height:min(50vh,320px);overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--card);box-shadow:0 8px 24px #0002}
+.suggestions[hidden]{display:none}
+.suggestion{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:0;border-bottom:1px solid var(--line);background:var(--card);color:var(--ink);text-align:right;cursor:pointer}
+.suggestion:last-child{border-bottom:0}
+.suggestion:hover,.suggestion[aria-selected="true"]{background:var(--bg)}
+.suggestion-name{direction:ltr;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.suggestion-qty{flex:none;color:var(--muted);font-size:12px}
+.filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;color:var(--muted);font-size:13px}
+.filter-group{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--card)}
+.filter{border:0;border-left:1px solid var(--line);background:transparent;color:var(--ink);padding:7px 11px;font-size:13px;cursor:pointer}
+.filter:last-child{border-left:0}
+.filter[aria-pressed="true"]{background:var(--accent);color:#fff}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 14px}
 .chip{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:5px 11px;font-size:13px;cursor:pointer}
 .meta{font-size:13px;color:var(--muted);margin:6px 0 10px}
@@ -33,9 +45,19 @@ label.chk{display:flex;align-items:center;gap:6px;font-size:14px;margin:10px 0;c
 <div class="wrap">
   <h1>بحث ذكي في المخزون</h1>
   <div class="stats" id="stats"></div>
-  <input type="search" id="q" placeholder="ابحث بالعربية أو الفرنسية أو الرقم المرجعي… مثال: فرامل شاكمان" autocomplete="off">
+  <div class="search-wrap">
+    <input type="search" id="q" placeholder="اكتب أول حرف لعرض اقتراحات الأصناف…" autocomplete="off" aria-label="البحث باسم القطعة أو رقمها" role="combobox" aria-autocomplete="list" aria-controls="suggestions" aria-expanded="false">
+    <div class="suggestions" id="suggestions" role="listbox" aria-label="اقتراحات الأصناف" hidden></div>
+  </div>
   <div class="chips" id="chips"></div>
-  <label class="chk"><input type="checkbox" id="inStock"> المتوفر فقط (الكمية أكبر من صفر)</label>
+  <div class="filters" aria-label="تصفية حسب حالة المخزون">
+    <span>حالة المخزون:</span>
+    <div class="filter-group" role="group" aria-label="حالة المخزون">
+      <button class="filter" type="button" data-stock="all" aria-pressed="true">الكل</button>
+      <button class="filter" type="button" data-stock="available" aria-pressed="false">المتوفر</button>
+      <button class="filter" type="button" data-stock="empty" aria-pressed="false">النافد</button>
+    </div>
+  </div>
   <div class="meta" id="meta"></div>
   <div id="list"></div>
 </div>
@@ -67,7 +89,7 @@ for(const k in SYN){ const nk=norm(k); SYNN[nk]=(SYNN[nk]||[]).concat(SYN[k].map
 const ROWS = DATA.map((r,i)=>{
   const [loc,des,ref,brand,qty]=r;
   const all=[des,ref,brand,loc].join(' ');
-  return {i,loc,des,ref,brand,qty,T:new Set(toks(all)),C:norm(all).replace(/[^a-z0-9\u0621-\u064a]/g,'')};
+  return {i,loc,des,ref,brand,qty,T:new Set(toks(all)),N:new Set(toks(des)),P:new Set(toks(`${des} ${ref}`)),C:norm(all).replace(/[^a-z0-9\u0621-\u064a]/g,'')};
 });
 
 function variants(t){
@@ -109,6 +131,61 @@ function search(q){
   return out;
 }
 
+let suggestedRows=[];
+let activeSuggestion=-1;
+function suggestionVariants(term){
+  const direct=new Set(variants(term));
+  const alternatives=new Set();
+  for(const [key,values] of Object.entries(SYNN)){
+    if(key.startsWith(term)) values.forEach(value=>alternatives.add(value));
+  }
+  return {direct:[...direct],alternatives:[...alternatives].filter(value=>!direct.has(value))};
+}
+function renderSuggestions(){
+  const input=document.getElementById('q');
+  const panel=document.getElementById('suggestions');
+  const queryTokens=toks(input.value.trim());
+  const term=queryTokens.pop();
+  if(!term){
+    suggestedRows=[];
+    activeSuggestion=-1;
+    panel.hidden=true;
+    input.setAttribute('aria-expanded','false');
+    return;
+  }
+  const matches=suggestionVariants(term);
+  suggestedRows=ROWS.map(r=>{
+    const nameMatches=[...r.N].filter(word=>matches.direct.some(match=>word.startsWith(match)));
+    const directMatch=[...r.P].some(word=>matches.direct.some(match=>word.startsWith(match)));
+    const referenceMatch=toks(r.ref).some(word=>matches.direct.some(match=>word.startsWith(match)));
+    const alternativeMatch=[...r.P].some(word=>matches.alternatives.some(match=>word.startsWith(match)));
+    const priorMatches=queryTokens.every(token=>bestTok(token,r)>0);
+    if((!directMatch&&!alternativeMatch)||!priorMatches) return null;
+    const score=(referenceMatch?5:0)+(directMatch?2:0)+(nameMatches.some(word=>matches.direct.includes(word))?1:0)+(r.qty>0?0.1:0);
+    return {r,score};
+  }).filter(Boolean).sort((a,b)=>b.score-a.score||a.r.des.localeCompare(b.r.des,'fr')).slice(0,8);
+  if(activeSuggestion>=suggestedRows.length) activeSuggestion=suggestedRows.length-1;
+  panel.innerHTML=suggestedRows.map(({r},index)=>
+    `<button class="suggestion" type="button" role="option" id="suggestion-${index}" aria-selected="${index===activeSuggestion}" data-index="${index}"><span class="suggestion-name">${esc(r.des)}</span><span class="suggestion-qty">الكمية: ${r.qty}</span></button>`
+  ).join('');
+  panel.hidden=!suggestedRows.length;
+  input.setAttribute('aria-expanded',String(suggestedRows.length>0));
+  if(activeSuggestion>=0) input.setAttribute('aria-activedescendant',`suggestion-${activeSuggestion}`);
+  else input.removeAttribute('aria-activedescendant');
+}
+function chooseSuggestion(index){
+  const selected=suggestedRows[index];
+  if(!selected) return;
+  const input=document.getElementById('q');
+  input.value=selected.r.des;
+  suggestedRows=[];
+  activeSuggestion=-1;
+  document.getElementById('suggestions').hidden=true;
+  input.setAttribute('aria-expanded','false');
+  input.removeAttribute('aria-activedescendant');
+  render();
+}
+
 function card(r){
   const cls=r.qty<=0?'q0':r.qty<=2?'q1':'qk';
   const tags=[
@@ -128,17 +205,48 @@ function renderStats(){
 
 function render(){
   const q=document.getElementById('q').value.trim();
-  const only=document.getElementById('inStock').checked;
+  const stock=document.querySelector('.filter[aria-pressed="true"]')?.dataset.stock||'all';
   const list=document.getElementById('list'), meta=document.getElementById('meta');
   let res = q ? search(q) : ROWS.map(r=>({r,score:0})).sort((a,b)=>a.r.des.localeCompare(b.r.des,'fr'));
-  if(only) res=res.filter(x=>x.r.qty>0);
+  if(stock==='available') res=res.filter(x=>x.r.qty>0);
+  if(stock==='empty') res=res.filter(x=>x.r.qty<=0);
   const total=res.length;
   meta.textContent = total ? (q ? `${total} نتيجة` : `${total} صنف (مرتبة أبجدياً)`) : 'لا توجد نتائج';
   list.innerHTML = total ? res.map(x=>card(x.r)).join('') : '<div class="empty">جرّب كلمة أخرى أو اكتب جزءاً من الرقم المرجعي</div>';
 }
 
-document.getElementById('q').addEventListener('input',render);
-document.getElementById('inStock').addEventListener('change',render);
+const queryInput=document.getElementById('q');
+queryInput.addEventListener('input',()=>{
+  activeSuggestion=-1;
+  renderSuggestions();
+  render();
+});
+queryInput.addEventListener('keydown',event=>{
+  if(event.key==='ArrowDown'&&suggestedRows.length){
+    event.preventDefault();
+    activeSuggestion=Math.min(activeSuggestion+1,suggestedRows.length-1);
+    renderSuggestions();
+  }else if(event.key==='ArrowUp'&&suggestedRows.length){
+    event.preventDefault();
+    activeSuggestion=Math.max(activeSuggestion-1,0);
+    renderSuggestions();
+  }else if(event.key==='Enter'&&activeSuggestion>=0){
+    event.preventDefault();
+    chooseSuggestion(activeSuggestion);
+  }else if(event.key==='Escape'){
+    activeSuggestion=-1;
+    suggestedRows=[];
+    renderSuggestions();
+  }
+});
+document.getElementById('suggestions').addEventListener('click',event=>{
+  const option=event.target.closest('.suggestion');
+  if(option) chooseSuggestion(Number(option.dataset.index));
+});
+document.querySelectorAll('.filter').forEach(button=>button.addEventListener('click',()=>{
+  document.querySelectorAll('.filter').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+  render();
+}));
 const examples=['فرامل شاكمان','filtre huile','CK8092','جوان','roulement','فولفو'];
 document.getElementById('chips').innerHTML=examples.map(e=>`<button class="chip" data-q="${esc(e)}">${esc(e)}</button>`).join('');
 document.querySelectorAll('.chip').forEach(b=>b.addEventListener('click',()=>{
